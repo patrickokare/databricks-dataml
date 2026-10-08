@@ -5,7 +5,7 @@
 Each project starts from a real or synthetic dataset and is fed by **dated incremental drops designed to break a naive pipeline**: late files, restatements, re-sends, schema drift, orphan rows, partial deliveries, out-of-order events. Every project ships with a **deterministic data generator and an answer key**, so "it works" is a row-count assertion, not an opinion.
 
 > **Author:** Patrick Okare, Data Engineer (9+ years: enterprise SaaS, financial services, healthcare)
-> **Contact:** [LinkedIn](https://www.linkedin.com/in/<your-handle>) · <your-email>
+> **Contact:** [LinkedIn](https://www.linkedin.com/in/patrickokare) · patrickbabawale@gmail.com
 
 ---
 

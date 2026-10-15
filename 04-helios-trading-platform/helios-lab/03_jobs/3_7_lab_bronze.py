@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # MAGIC %md
 # MAGIC # Lab 3.7: Bronze: Auto Loader from the Volume
 # MAGIC
@@ -36,9 +40,9 @@ from pyspark.sql.functions import col, current_timestamp
 # Clean slate: reset the layer this lab builds (Bronze) and re-land batch one, so the lab is
 # deterministic on every run. Resetting a schema also clears its checkpoints Volume.
 catalog = helios_identity()
-reset_schema(catalog, "helios_bronze")
-clear_landing(catalog)
-ensure_landing(catalog, up_to_batch=1)
+# reset_schema(catalog, "helios_bronze")
+# clear_landing(catalog)
+# ensure_landing(catalog, up_to_batch=1)
 
 # COMMAND ----------
 
@@ -83,6 +87,36 @@ ensure_landing(catalog, up_to_batch=1)
 
 # Your turn. Ingest order_lines with Auto Loader into bronze_order_lines.
 # (Import what you use from pyspark.sql.functions.)
+
+from pyspark.sql.functions import col, current_timestamp
+
+spark.sql(f"""
+          CREATE VOLUME IF NOT EXISTS {catalog}.helios_bronze.checkpoints
+          """ 
+)
+
+chk  = f"/Volumes/{catalog}/helios_bronze/checkpoints"
+root = f"/Volumes/{catalog}/helios_raw/helios_landing"
+feed = "order_lines"
+stream = (
+    spark.readStream.format("cloudFiles")
+    .option("cloudFiles.format", "json")
+    .option("cloudFiles.schemaLocation", f"{chk}/{feed}/schema")
+    .option("cloudFiles.schemaEvolutionMode", "addNewColumns")
+    .option("rescuedDataColumn", "_rescued_data")
+    .load(f"{root}/{feed}")
+    .withColumn("_ingest_ts", current_timestamp())
+    .withColumn("_source_file", col("_metadata.file_path"))
+)
+
+query = (
+    stream.writeStream
+    .option("checkpointLocation", f"{chk}/{feed}/chk")
+    .option("mergeSchema", "true")
+    .trigger(availableNow=True)
+    .toTable(f"{catalog}.helios_bronze.bronze_{feed}")
+)
+query.awaitTermination()
 
 # COMMAND ----------
 
@@ -185,6 +219,41 @@ check("nothing landed in the rescued-data column", 0, bronze_lines.filter("_resc
 # COMMAND ----------
 
 # Your turn. Ingest the remaining eight feeds into their bronze_ tables.
+from pyspark.sql.functions import col, current_timestamp
+spark.sql(f'CREATE VOLUME IF NOT EXISTS {catalog}.helios_bronze.checkpoints')
+
+chk  = f"/Volumes/{catalog}/helios_bronze/checkpoints"
+root = f"/Volumes/{catalog}/helios_raw/helios_landing"
+feeds = {'orders':"json", 'inventory':"json",'price_list':"csv", 'customers':"parquet", 'products':"parquet", 'categories':"parquet", 'suppliers':"json",'warehouses':"json"}
+
+
+
+for feed, fmt in feeds.items():
+    reader = (
+        spark.readStream.format("cloudFiles")
+        .option("cloudFiles.format", fmt)
+        .option("cloudFiles.schemaLocation", f"{chk}/{feed}/schema")
+        .option("cloudFiles.schemaEvolutionMode", "addNewColumns")
+        .option("rescuedDataColumn", "_rescued_data")
+    )
+    if fmt == "csv":
+        reader = reader.option("header", "true")
+
+    stream = (
+        reader.load(f"{root}/{feed}")
+        .withColumn("_ingest_ts", current_timestamp())
+        .withColumn("_source_file", col("_metadata.file_path"))
+    )
+
+    query = (
+        stream.writeStream
+        .option("checkpointLocation", f"{chk}/{feed}/chk")
+        .option("mergeSchema", "true")
+        .trigger(availableNow=True)
+        .toTable(f"{catalog}.helios_bronze.bronze_{feed}")
+    )
+    query.awaitTermination()
+
 
 # COMMAND ----------
 

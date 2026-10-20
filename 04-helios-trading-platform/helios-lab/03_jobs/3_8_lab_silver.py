@@ -81,11 +81,18 @@ ensure_landing(catalog, up_to_batch=2)
 # Your turn. Write upsert(source, table, keys).
 
 def upsert(source, table, keys):
-    ...
+    if isinstance (keys, str):
+        keys = [keys]
+    else:
+        keys
+
+    pass
+
+
+
     (DeltaTable.forName(spark, table).alias("t")
         .merge(source.alias("s"), condition)
         .whenMatchedUpdateAll().whenNotMatchedInsertAll().execute())
-
 
 
 

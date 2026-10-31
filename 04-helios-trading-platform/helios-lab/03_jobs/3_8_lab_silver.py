@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # MAGIC %md
 # MAGIC # Lab 3.8: Silver: type, dedupe, quality and CDC
 # MAGIC
@@ -43,9 +47,9 @@ from delta.tables import DeltaTable
 # Clean slate: reset Bronze (rebuilt below) and Silver (which you build), and re-land batches one and two, so
 # the lab is deterministic on every run. Resetting a schema also clears its checkpoints Volume.
 catalog = helios_identity()
-for layer in ["helios_bronze", "helios_silver"]:
-    reset_schema(catalog, layer)
-clear_landing(catalog)
+# for layer in ["helios_bronze", "helios_silver"]:
+#     reset_schema(catalog, layer)
+# clear_landing(catalog)
 ensure_landing(catalog, up_to_batch=2)
 
 # COMMAND ----------
@@ -86,13 +90,15 @@ def upsert(source, table, keys):
     else:
         keys
 
-    pass
-
+    source.limit(0).write.format("delta").mode("ignore").saveAsTable(table)
+    condition = " AND ".join(f"t.{k} = s.{k}" for k in keys)
 
 
     (DeltaTable.forName(spark, table).alias("t")
         .merge(source.alias("s"), condition)
-        .whenMatchedUpdateAll().whenNotMatchedInsertAll().execute())
+        .whenMatchedUpdateAll()
+        .whenNotMatchedInsertAll()
+        .execute())
 
 
 
@@ -204,6 +210,51 @@ spark.sql(f"DROP TABLE IF EXISTS {test_table}")
 # COMMAND ----------
 
 # Your turn. Stream order_lines into silver_order_lines (clean) and the quarantine table.
+bronze = f"{catalog}.helios_bronze"
+silver = f"{catalog}.helios_silver"
+clean_table = f"{silver}.silver_order_lines"
+quarantine_table = f"{silver}.silver_order_lines_quarantine"
+
+spark.sql(f"CREATE VOLUME IF NOT EXISTS {catalog}.helios_silver.checkpoints")
+chk  = f"/Volumes/{catalog}/helios_silver/checkpoints"
+
+def to_silver_order_lines(micro_batch, _batch_id):
+    # micro_batch is a static DataFrame. Ordinary batch code from here on.
+    # Keep one row per order_line_id: the latest by line_ts.
+    latest_per_line = Window.partitionBy("order_line_id").orderBy(col("line_ts").desc_nulls_last())
+    deduped = (
+        micro_batch
+        .withColumn("_rn", row_number().over(latest_per_line))
+        .filter(col("_rn") == 1)
+        .drop("_rn")
+    )
+
+# Read Bronze as a stream and type every column to the target schema.
+typed_stream = spark.readStream.table(f"{bronze}.bronze_order_lines").select(
+    col("order_line_id").cast("string").alias("order_line_id"),
+    col("order_id").cast("string").alias("order_id"),
+    col("product_id").cast("string").alias("product_id"),
+    col("customer_id").cast("string").alias("customer_id"),
+    col("warehouse_id").cast("string").alias("warehouse_id"),
+    col("quantity").cast("int").alias("quantity"),
+    col("line_ts").cast("timestamp").alias("line_ts")
+)
+    # Split on the contract rule, defined once so the two filters can never disagree.
+    breaks_contract = "quantity IS NULL OR quantity <= 0 OR product_id IS NULL"
+    clean = deduped.filter(f"NOT ({breaks_contract})")
+    quarantine = deduped.filter(breaks_contract)
+
+    upsert(clean, clean_table, "order_line_id")
+    upsert(quarantine, quarantine_table, "order_line_id")
+
+(
+    typed_stream.writeStream
+    .foreachBatch(to_silver_order_lines)
+    .option("checkpointLocation", f"{chk}/silver_order_lines")
+    .trigger(availableNow=True)
+    .start()
+    .awaitTermination()
+)
 
 # COMMAND ----------
 

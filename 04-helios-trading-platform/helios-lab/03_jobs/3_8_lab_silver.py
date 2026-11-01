@@ -229,6 +229,14 @@ def to_silver_order_lines(micro_batch, _batch_id):
         .drop("_rn")
     )
 
+    # Split on the contract rule, defined once so the two filters can never disagree.
+    breaks_contract = "quantity IS NULL OR quantity <= 0 OR product_id IS NULL"
+    clean = deduped.filter(f"NOT ({breaks_contract})")
+    quarantine = deduped.filter(breaks_contract)
+
+    upsert(clean, clean_table, "order_line_id")
+    upsert(quarantine, quarantine_table, "order_line_id")
+
 # Read Bronze as a stream and type every column to the target schema.
 typed_stream = spark.readStream.table(f"{bronze}.bronze_order_lines").select(
     col("order_line_id").cast("string").alias("order_line_id"),
@@ -239,13 +247,6 @@ typed_stream = spark.readStream.table(f"{bronze}.bronze_order_lines").select(
     col("quantity").cast("int").alias("quantity"),
     col("line_ts").cast("timestamp").alias("line_ts")
 )
-    # Split on the contract rule, defined once so the two filters can never disagree.
-    breaks_contract = "quantity IS NULL OR quantity <= 0 OR product_id IS NULL"
-    clean = deduped.filter(f"NOT ({breaks_contract})")
-    quarantine = deduped.filter(breaks_contract)
-
-    upsert(clean, clean_table, "order_line_id")
-    upsert(quarantine, quarantine_table, "order_line_id")
 
 (
     typed_stream.writeStream
@@ -310,6 +311,11 @@ check("every quarantined row really breaks a rule", 0, quarantine.filter(f"NOT (
 
 # COMMAND ----------
 
+# MAGIC %sql
+# MAGIC SELECT * FROM labs_waleokare.helios_bronze.bronze_orders LIMIT 10
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## Task 3: silver_orders: reduce the CDC feed to current state
 # MAGIC
@@ -359,6 +365,31 @@ check("every quarantined row really breaks a rule", 0, quarantine.filter(f"NOT (
 # COMMAND ----------
 
 # Your turn. Build silver_orders: one current row per order_id, purged orders removed.
+bronze = f"{catalog}.helios_bronze"
+silver = f"{catalog}.helios_silver"
+silver_orders = f"{silver}.silver_orders"
+
+
+bronze_orders_df = spark.read.table(f"{bronze}.bronze_orders").select(
+    col("order_id").cast("string").alias("order_line_id"),
+    col("customer_id").cast("string").alias("order_id"),
+    col("warehouse_id").cast("string").alias("product_id"),
+    col("channel").cast("string").alias("customer_id"),
+    col("order_ts").cast("string").alias("warehouse_id"),
+    col("status").cast("int").alias("quantity"),
+    col("change_ts").cast("timestamp").alias("line_ts")
+)
+
+
+
+
+
+
+
+
+
+
+
 
 # COMMAND ----------
 

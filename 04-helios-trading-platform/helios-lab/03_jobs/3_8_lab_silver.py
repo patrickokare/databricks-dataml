@@ -311,11 +311,6 @@ check("every quarantined row really breaks a rule", 0, quarantine.filter(f"NOT (
 
 # COMMAND ----------
 
-# MAGIC %sql
-# MAGIC SELECT * FROM labs_waleokare.helios_bronze.bronze_orders LIMIT 10
-
-# COMMAND ----------
-
 # MAGIC %md
 # MAGIC ## Task 3: silver_orders: reduce the CDC feed to current state
 # MAGIC
@@ -367,28 +362,47 @@ check("every quarantined row really breaks a rule", 0, quarantine.filter(f"NOT (
 # Your turn. Build silver_orders: one current row per order_id, purged orders removed.
 bronze = f"{catalog}.helios_bronze"
 silver = f"{catalog}.helios_silver"
-silver_orders = f"{silver}.silver_orders"
+orders_table = f"{silver}.silver_orders"
 
-
-bronze_orders_df = spark.read.table(f"{bronze}.bronze_orders").select(
-    col("order_id").cast("string").alias("order_line_id"),
-    col("customer_id").cast("string").alias("order_id"),
-    col("warehouse_id").cast("string").alias("product_id"),
-    col("channel").cast("string").alias("customer_id"),
-    col("order_ts").cast("string").alias("warehouse_id"),
-    col("status").cast("int").alias("quantity"),
-    col("change_ts").cast("timestamp").alias("line_ts")
+# Each Bronze row is one CDC change. Type every column, keeping op for the split below.
+typed_changes = spark.read.table(f"{bronze}.bronze_orders").select(
+    col("order_id").cast("string").alias("order_id"),
+    col("customer_id").cast("string").alias("customer_id"),
+    col("warehouse_id").cast("string").alias("warehouse_id"),
+    col("channel").cast("string").alias("channel"),
+    col("order_ts").cast("timestamp").alias("order_ts"),
+    col("status").cast("string").alias("status"),
+    col("change_seq").cast("bigint").alias("change_seq"),
+    col("change_ts").cast("timestamp").alias("change_ts"),
+    col("op").cast("string").alias("op")
+)
+# The latest change per order wins. change_seq is already bigint here, so 10 sorts after 9.
+latest_per_order = Window.partitionBy("order_id").orderBy(col("change_seq").desc())
+latest_change = (
+    typed_changes
+    .withColumn("_rn", row_number().over(latest_per_order))
+    .filter(col("_rn") == 1)
+    .drop("_rn")
 )
 
+# Silver holds everything except the CDC op flag.
+silver_columns = ["order_id", "customer_id", "warehouse_id", "channel","order_ts", "status", "change_seq", "change_ts"]
 
+# A latest change of DELETE means the order was purged at the source; everything else is live.
+is_purged = "op = 'DELETE'"
+to_remove = latest_change.filter(is_purged).select("order_id")
+to_upsert = latest_change.filter(f"NOT ({is_purged})").select(*silver_columns)
 
+# Insert or update the live orders first (this also creates the table on the first run)...
+upsert(to_upsert, orders_table, "order_id")
 
-
-
-
-
-
-
+# ...then delete any purged orders already in Silver.
+(
+    DeltaTable.forName(spark, orders_table).alias("t")
+    .merge(to_remove.alias("s"), "t.order_id = s.order_id")
+    .whenMatchedDelete()
+    .execute()
+)
 
 
 # COMMAND ----------
@@ -489,6 +503,17 @@ check(f"{oid} reflects its latest change_seq", bronze_seq, silver_seq)
 # COMMAND ----------
 
 # Your turn. Build silver_returns (valid) and silver_returns_quarantine (orphans / bad dates).
+
+
+
+
+
+
+
+
+
+
+
 
 # COMMAND ----------
 

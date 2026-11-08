@@ -503,15 +503,55 @@ check(f"{oid} reflects its latest change_seq", bronze_seq, silver_seq)
 # COMMAND ----------
 
 # Your turn. Build silver_returns (valid) and silver_returns_quarantine (orphans / bad dates).
+bronze = f"{catalog}.helios_bronze"
+silver = f"{catalog}.helios_silver"
+returns_table = f"{silver}.silver_returns"
+quarantine_table = f"{silver}.silver_returns_quarantine"
 
+# Type every return column to the target schema.
+typed_returns = spark.read.table(f"{bronze}.bronze_returns").select(
+    col("return_id").cast("string").alias("return_id"),
+    col("order_line_id").cast("string").alias("order_line_id"),
+    col("return_ts").cast("timestamp").alias("return_ts"),
+    col("quantity").cast("int").alias("quantity"),
+    col("reason").cast("string").alias("reason")
+)
 
+# The lines a return can legally point at, renamed so the join leaves no duplicate column names.
+line_ref = spark.read.table(f"{silver}.silver_order_lines").select(
+    col("order_line_id").alias("_ol"), 
+    col("line_ts").alias("_line_ts")
+)
 
+# Left join keeps orphans: they come through with a null _line_ts instead of being dropped.
+returns_with_line = typed_returns.join(line_ref, typed_returns.order_line_id == line_ref._ol, how="left")
 
+# Valid: points at a real line and is dated strictly after it.
+# coalesce(..., false) turns a null result (for example a null return_ts) into "not valid",
+# so every return lands in exactly one of the two tables.
+is_valid = "coalesce(_line_ts IS NOT NULL AND return_ts > _line_ts, false)"
 
+# Silver holds the typed return columns only; the helper _ol and _line_ts columns are dropped.
+silver_columns = ["return_id", "order_line_id", "return_ts", "quantity", "reason"]
+valid = returns_with_line.filter(is_valid).select(*silver_columns)
+quarantine = returns_with_line.filter(f"NOT ({is_valid})").select(*silver_columns)
 
+upsert(valid, returns_table, "return_id")
+upsert(quarantine, quarantine_table, "return_id")
 
-
-
+# --- Optional production step (not required by the lab): release returns from quarantine once they become valid ---
+# Scenario: a return lands before its order line, so an earlier run quarantined it. Once the line arrives,
+# this run upserts the return into the clean table, but the old copy is still sitting in quarantine.
+# Fix: after both upserts, delete from quarantine every return_id that is now in the clean set.
+# Within one run, valid and quarantine are disjoint, so this only removes stale rows from earlier runs.
+# Runs after the quarantine upsert, so the quarantine table always exists by this point.
+#
+# (
+#     DeltaTable.forName(spark, quarantine_table).alias("t")
+#     .merge(valid.select("return_id").alias("s"), "t.return_id = s.return_id")
+#     .whenMatchedDelete()
+#     .execute()
+# )
 
 
 
@@ -599,6 +639,78 @@ check("every return is dated after its line", 0, joined.filter("r.return_ts <= l
 # COMMAND ----------
 
 # Your turn. Overwrite the five dimensions and upsert silver_inventory.
+bronze = f"{catalog}.helios_bronze"
+silver = f"{catalog}.helios_silver"
+products_table = f"{silver}.silver_products"
+categories_table = f"{silver}.silver_categories"
+suppliers_table = f"{silver}.silver_suppliers"
+warehouses_table = f"{silver}.silver_warehouses"
+inventory_table = f"{silver}.silver_inventory"
+
+def overwrite(df, table):
+    df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable(table)
+
+# --- silver_products: typed, one row per product_id ---
+overwrite(
+    spark.read.table(f"{bronze}.bronze_products").select(
+        col("product_id").cast("string").alias("product_id"),
+        col("sku").cast("string").alias("sku"),
+        col("product_name").cast("string").alias("product_name"),
+        col("category_id").cast("string").alias("category_id"),
+        col("supplier_id").cast("string").alias("supplier_id"),
+        col("mass_kg").cast("double").alias("mass_kg"),
+        col("hazard_class").cast("string").alias("hazard_class"),
+        col("active").cast("boolean").alias("active"),
+    ).dropDuplicates(["product_id"]),products_table)
+
+# --- silver_categories: typed, one row per category_id ---
+overwrite(
+    spark.read.table(f"{bronze}.bronze_categories").select(
+        col("category_id").cast("string").alias("category_id"),
+        col("category_name").cast("string").alias("category_name"),
+        col("department").cast("string").alias("department"),
+    ).dropDuplicates(["category_id"]),
+    categories_table)
+
+# --- silver_suppliers: typed, one row per supplier_id ---
+overwrite(
+    spark.read.table(f"{bronze}.bronze_suppliers").select(
+        col("supplier_id").cast("string").alias("supplier_id"),
+        col("supplier_name").cast("string").alias("supplier_name"),
+        col("home_region").cast("string").alias("home_region"),
+        col("active").cast("boolean").alias("active"),
+    ).dropDuplicates(["supplier_id"]),
+    suppliers_table)
+
+# --- silver_warehouses: typed, one row per warehouse_id ---
+overwrite(
+    spark.read.table(f"{bronze}.bronze_warehouses").select(
+        col("warehouse_id").cast("string").alias("warehouse_id"),
+        col("warehouse_name").cast("string").alias("warehouse_name"),
+        col("body").cast("string").alias("body"),
+        col("region").cast("string").alias("region"),
+        col("uplink_reliability").cast("double").alias("uplink_reliability"),
+    ).dropDuplicates(["warehouse_id"]),
+    warehouses_table)
+
+# --- silver_inventory: append movement log, upserted on composite key ---
+inventory = (
+    spark.read.table(f"{bronze}.bronze_inventory")
+    .select(
+        col("warehouse_id").cast("string").alias("warehouse_id"),
+        col("product_id").cast("string").alias("product_id"),
+        col("movement_ts").cast("timestamp").alias("movement_ts"),
+        col("delta").cast("int").alias("delta"),
+        col("on_hand").cast("int").alias("on_hand"),
+    )
+    .dropDuplicates(["warehouse_id", "product_id", "movement_ts"])
+)
+upsert(inventory, inventory_table, ["warehouse_id", "product_id", "movement_ts"])
+
+
+
+
+
 
 # COMMAND ----------
 

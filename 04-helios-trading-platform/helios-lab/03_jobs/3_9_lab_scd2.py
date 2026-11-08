@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # MAGIC %md
 # MAGIC # Lab 3.9: Two SCD Type 2 dimensions: price and customer
 # MAGIC
@@ -48,6 +52,11 @@ ensure_landing(catalog, up_to_batch=3)
 
 # COMMAND ----------
 
+df = spark.read.table("labs_waleokare.helios_bronze.bronze_price_list")
+display(df.filter('product_id = "PRD-001"'))
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## Task 1: silver_price_scd: build the price history with a window and a MERGE
 # MAGIC
@@ -82,6 +91,33 @@ ensure_landing(catalog, up_to_batch=3)
 # COMMAND ----------
 
 # Your turn. Build silver_price_scd: distinct versions, shape the effective ranges with a window, then MERGE on price_sk.
+bronze = f"{catalog}.helios_bronze"
+silver = f"{catalog}.helios_silver"
+price_table = f"{silver}.silver_price_scd"
+
+
+def upsert(source, table, keys):
+    if isinstance(keys, str):
+        keys = [keys]
+    source.limit(0).write.format("delta").mode("ignore").saveAsTable(table)
+    condition = " AND ".join(f"t.{k} = s.{k}" for k in keys)
+    (DeltaTable.forName(spark, table).alias("t")
+        .merge(source.alias("s"), condition)
+        .whenMatchedUpdateAll()
+        .whenNotMatchedInsertAll()
+        .execute())
+
+
+typed_price_list = spark.read.table(f"{bronze}.bronze_price_list").select(
+        col("product_id").cast("string").alias("product_id"),
+        col("supplier_id").cast("string").alias("supplier_id"),
+        col("unit_price").cast("string").alias("unit_price"),
+        col("unit_cost").cast("string").alias("unit_cost"),
+        col("currency").cast("string").alias("currency"),
+        col("effective_from").cast("string").alias("effective_from")
+)
+
+
 
 # COMMAND ----------
 

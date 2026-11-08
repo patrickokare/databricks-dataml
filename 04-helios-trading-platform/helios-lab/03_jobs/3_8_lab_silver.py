@@ -707,11 +707,6 @@ inventory = (
 )
 upsert(inventory, inventory_table, ["warehouse_id", "product_id", "movement_ts"])
 
-
-
-
-
-
 # COMMAND ----------
 
 # MAGIC %md-sandbox

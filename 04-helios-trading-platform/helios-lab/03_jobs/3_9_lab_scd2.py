@@ -210,16 +210,10 @@ check("every product is priced from the base date", 0, starts.filter("first <> D
 
 # COMMAND ----------
 
-df = spark.read.table("labs_waleokare.helios_bronze.bronze_customers")
-rule = "customer_id = 'CUST-0001'"
-display(df.filter(rule))
-
-# COMMAND ----------
-
 # Your turn. Build silver_customer_scd: the full customer SCD2, version on tier change with a window, then MERGE on customer_sk.
 bronze = f"{catalog}.helios_bronze"
 silver = f"{catalog}.helios_silver"
-price_table = f"{silver}.silver_customer_scd"
+customer_table = f"{silver}.silver_customer_scd"
 
 typed_customers = spark.read.table(f"{bronze}.bronze_customers").select(
         "customer_id",
@@ -231,12 +225,26 @@ typed_customers = spark.read.table(f"{bronze}.bronze_customers").select(
         col("snapshot_date").cast("date").alias("snapshot_date")
 ).dropDuplicates(['customer_id','snapshot_date'])
 
+by_customer = Window.partitionBy("customer_id").orderBy("snapshot_date")
 
+customer_versions = (
+    typed_customers
+    # A version starts on a customer's first snapshot, or where the tier differs from the previous one.
+    .withColumn("prev_tier", lag("tier").over(by_customer))
+    .filter(col("prev_tier").isNull() | (col("tier") != col("prev_tier")))
+    # After the filter, lead looks at the next version, not tomorrow's snapshot.
+    .withColumn("effective_to", lead("snapshot_date").over(by_customer))
+    .withColumn("is_current", col("effective_to").isNull())
+    # Build the key while the column is still called snapshot_date.
+    .withColumn("customer_sk", concat_ws("_", col("customer_id"), date_format("snapshot_date", "yyyyMMdd")))
+    .withColumnRenamed("snapshot_date", "effective_from")
+)
+customer_versions = customer_versions.select(
+    "customer_sk", "customer_id", "customer_name", "customer_type", "tier",
+    "home_warehouse_id", "signup_date", "effective_from", "effective_to", "is_current"
+)
 
-
-
-
-
+upsert(customer_versions, customer_table, "customer_sk")
 
 # COMMAND ----------
 

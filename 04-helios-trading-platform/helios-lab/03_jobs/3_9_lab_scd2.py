@@ -52,11 +52,6 @@ ensure_landing(catalog, up_to_batch=3)
 
 # COMMAND ----------
 
-df = spark.read.table("labs_waleokare.helios_bronze.bronze_price_list")
-display(df.filter('product_id = "PRD-001"'))
-
-# COMMAND ----------
-
 # MAGIC %md
 # MAGIC ## Task 1: silver_price_scd: build the price history with a window and a MERGE
 # MAGIC
@@ -95,7 +90,6 @@ bronze = f"{catalog}.helios_bronze"
 silver = f"{catalog}.helios_silver"
 price_table = f"{silver}.silver_price_scd"
 
-
 def upsert(source, table, keys):
     if isinstance(keys, str):
         keys = [keys]
@@ -107,17 +101,25 @@ def upsert(source, table, keys):
         .whenNotMatchedInsertAll()
         .execute())
 
-
 typed_price_list = spark.read.table(f"{bronze}.bronze_price_list").select(
-        col("product_id").cast("string").alias("product_id"),
-        col("supplier_id").cast("string").alias("supplier_id"),
-        col("unit_price").cast("string").alias("unit_price"),
-        col("unit_cost").cast("string").alias("unit_cost"),
-        col("currency").cast("string").alias("currency"),
-        col("effective_from").cast("string").alias("effective_from")
+        "product_id",
+        "supplier_id",
+        col("unit_price").cast("decimal(12,2)").alias("unit_price"),
+        col("unit_cost").cast("decimal(12,2)").alias("unit_cost"),
+        "currency",
+        col("effective_from").cast("date").alias("effective_from")
+).dropDuplicates(['product_id','effective_from'])
+
+by_product = Window.partitionBy("product_id").orderBy("effective_from")
+
+price_versions = (
+    typed_price_list
+    .withColumn("effective_to", lead("effective_from").over(by_product))
+    .withColumn("is_current", col("effective_to").isNull())
+    .withColumn("price_sk", concat_ws("_", col("product_id"), date_format("effective_from", "yyyyMMdd")))
 )
 
-
+upsert(price_versions, price_table, "price_sk")
 
 # COMMAND ----------
 
@@ -208,7 +210,33 @@ check("every product is priced from the base date", 0, starts.filter("first <> D
 
 # COMMAND ----------
 
+df = spark.read.table("labs_waleokare.helios_bronze.bronze_customers")
+rule = "customer_id = 'CUST-0001'"
+display(df.filter(rule))
+
+# COMMAND ----------
+
 # Your turn. Build silver_customer_scd: the full customer SCD2, version on tier change with a window, then MERGE on customer_sk.
+bronze = f"{catalog}.helios_bronze"
+silver = f"{catalog}.helios_silver"
+price_table = f"{silver}.silver_customer_scd"
+
+typed_customers = spark.read.table(f"{bronze}.bronze_customers").select(
+        "customer_id",
+        "customer_name",
+        "customer_type",
+        "tier",
+        "home_warehouse_id",
+        col("signup_date").cast("date").alias("signup_date"),
+        col("snapshot_date").cast("date").alias("snapshot_date")
+).dropDuplicates(['customer_id','snapshot_date'])
+
+
+
+
+
+
+
 
 # COMMAND ----------
 

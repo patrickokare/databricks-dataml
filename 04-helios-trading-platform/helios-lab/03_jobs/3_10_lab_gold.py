@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # MAGIC %md
 # MAGIC # Lab 3.10: Gold: star schema, point in time pricing, three facts
 # MAGIC
@@ -108,7 +112,55 @@ def upsert(source, table, keys):
 
 # COMMAND ----------
 
-# Your turn. Overwrite the eight Gold dimensions.
+# Your turn. Overwrite the six Gold dimensions: five conformed dimensions from Silver, plus a generated dim_date.
+silver = f"{catalog}.helios_silver"
+gold = f"{catalog}.helios_gold"
+dim_product = f"{gold}.dim_product"
+dim_customer = f"{gold}.dim_customer"
+dim_supplier = f"{gold}.dim_supplier"
+dim_warehouse = f"{gold}.dim_warehouse"
+dim_category = f"{gold}.dim_category"
+dim_date = f"{gold}.dim_date"
+
+silver_to_gold = [
+    (f"{silver}.silver_products", dim_product,["product_id", "sku", "product_name", "category_id", "supplier_id", "mass_kg", "hazard_class", "active"]),
+    (f"{silver}.silver_customer_scd", dim_customer,["customer_sk", "customer_id", "customer_name", "customer_type", "tier", "home_warehouse_id","signup_date", "effective_from", "effective_to", "is_current"]),
+    (f"{silver}.silver_suppliers", dim_supplier,["supplier_id", "supplier_name", "home_region", "active"]),
+    (f"{silver}.silver_warehouses", dim_warehouse,["warehouse_id", "warehouse_name", "body", "region", "uplink_reliability"]),
+    (f"{silver}.silver_categories", dim_category,["category_id", "category_name", "department"])
+]
+
+for source, target, columns in silver_to_gold:
+    print(source)
+    
+    df = spark.read.table(source).select(*columns)
+    df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable(target)
+
+
+
+dates = (
+    spark.read.table(f"{silver}.silver_order_lines").select(to_date("line_ts").alias("d"))
+    .union(spark.read.table(f"{silver}.silver_inventory").select(to_date("movement_ts").alias("d")))
+)
+# The first and last activity date, as a one-row DataFrame.
+span = dates.select(min_("d").alias("from_date"), max_("d").alias("to_date"))
+
+# sequence() builds an array of every day in the range (quiet days included); explode() makes one row per day.
+calendar = (
+    span.select(explode(sequence(col("from_date"), col("to_date"), expr("INTERVAL 1 DAY"))).alias("date"))
+    .select(
+        date_format("date", "yyyyMMdd").cast("int").alias("date_key"),
+        col("date"),
+        year("date").alias("year"),
+        month("date").alias("month"),
+        dayofmonth("date").alias("day"),
+        date_format("date", "EEEE").alias("day_name"),
+        dayofweek("date").isin(1, 7).alias("is_weekend"),  # dayofweek: 1 = Sunday, 7 = Saturday
+    )
+)
+
+calendar.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable(dim_date)
+
 
 # COMMAND ----------
 
@@ -210,6 +262,25 @@ check("date_key is typed as an int", "int", dict(dim_date.dtypes)["date_key"])
 # COMMAND ----------
 
 # Your turn. Build the point in time priced fact and upsert it on order_line_id.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # COMMAND ----------
 

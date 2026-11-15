@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # MAGIC %md
 # MAGIC # Lab 3.11: Orchestrate the medallion as one Job
 # MAGIC
@@ -92,6 +96,26 @@ def find_job():
 # COMMAND ----------
 
 # Your turn. Build the five tasks with the SDK and create the Job (capture job_id).
+def nb_task(key, notebook, deps=None):
+    return jobs.Task(
+        task_key=key,
+        notebook_task=jobs.NotebookTask(notebook_path=f"{tasks_dir}/{notebook}", source=jobs.Source.WORKSPACE),
+        depends_on=[jobs.TaskDependency(task_key=d) for d in (deps or [])],
+        max_retries=2, min_retry_interval_millis=30_000,
+    )
+
+tasks = [nb_task("bronze", "01_bronze"),
+         nb_task("silver", "02_silver", ["bronze"]),
+         nb_task("scd", "03_scd", ["bronze"]),
+         nb_task("gold", "04_gold", ["silver", "scd"]),
+         nb_task("self_check", "05_self_check", ["gold"])]
+
+for existing in w.jobs.list(name=job_name):     # replace any existing Job of this name
+    w.jobs.delete(job_id=existing.job_id)
+
+job_id = w.jobs.create(name=job_name, tasks=tasks, max_concurrent_runs=1).job_id
+print(f"Created Job {job_id}: {job_name}")
+
 
 # COMMAND ----------
 
@@ -188,6 +212,22 @@ check_true("every task has retries", all((t.max_retries or 0) >= 2 for t in info
 # COMMAND ----------
 
 # Your turn. Add a paused daily schedule and a failure email to the Job.
+job = find_job()
+info = w.jobs.get(job_id=job.job_id)
+w.jobs.update(
+    job_id=job.job_id,
+    new_settings=jobs.JobSettings(
+        tasks=info.settings.tasks,            # keep the task graph from Task 1
+        schedule=jobs.CronSchedule(
+            quartz_cron_expression="0 0 6 * * ?",     # 06:00 daily
+            timezone_id="UTC",
+            pause_status=jobs.PauseStatus.PAUSED,     # paused: this lab triggers runs on demand
+        ),
+        email_notifications=jobs.JobEmailNotifications(on_failure=[username]),
+    ),
+)
+print("Schedule and failure alert added")
+
 
 # COMMAND ----------
 
@@ -281,6 +321,11 @@ check("the five tasks are still in place", 5, len(info.settings.tasks))
 # COMMAND ----------
 
 # Your turn. Run the Job, wait for it, and confirm it succeeded.
+run = w.jobs.run_now(job_id=find_job().job_id).result()    # trigger and wait
+print(f"Run {run.run_id} finished with {run.state.result_state}")
+for t in run.tasks:
+    print(f"  {t.task_key:<12} {t.state.result_state}")
+
 
 # COMMAND ----------
 

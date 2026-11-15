@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # MAGIC %md
 # MAGIC # Pipeline source: bronze (Lab 4.5) -- YOUR WORKSHEET
 # MAGIC
@@ -29,3 +33,37 @@ gold = f"{catalog}.helios_gold"
 # Open 4_5_lab_bronze, the task, for the full instructions and the reveal solution.
 #
 # YOUR CODE BELOW:
+
+def bronze_feed(name, fmt, extra_options=None):
+    @dp.table(name=f"{bronze}.bronze_{name}",
+              comment=f"Raw {name} feed, ingested from the landing volume with Auto Loader")
+    def ingest():
+        reader = (
+            spark.readStream
+                .format("cloudFiles")
+                .option("cloudFiles.format", fmt)
+                .option("cloudFiles.schemaLocation", f"{landing}/_schemas/{name}")
+                .option("cloudFiles.schemaEvolutionMode", "addNewColumns")
+                .option("rescuedDataColumn", "_rescued_data")
+        )
+        if extra_options:
+            for k, v in extra_options.items():
+                reader = reader.option(k, v)
+        return (
+            reader
+                .load(f"{landing}/{name}")
+                .selectExpr("*",
+                            "current_timestamp() AS _ingest_ts",
+                            "_metadata.file_path AS _source_file")
+        )
+
+# JSON feeds
+for feed in ["order_lines", "orders", "returns", "inventory", "suppliers", "warehouses"]:
+    bronze_feed(feed, "json")
+
+# CSV feed (with header)
+bronze_feed("price_list", "csv", {"header": "true"})
+
+# Parquet feeds
+for feed in ["customers", "products", "categories"]:
+    bronze_feed(feed, "parquet")

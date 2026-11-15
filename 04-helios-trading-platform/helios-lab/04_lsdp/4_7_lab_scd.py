@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # MAGIC %md
 # MAGIC # Lab 4.7: Reduce the change feeds with AUTO CDC and SCD Type 2
 # MAGIC

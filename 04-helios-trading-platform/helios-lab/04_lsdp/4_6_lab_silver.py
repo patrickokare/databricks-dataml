@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # MAGIC %md
 # MAGIC # Lab 4.6: Build the quality gated silver layer
 # MAGIC
@@ -126,6 +130,7 @@ print(f"Created pipeline {pipeline_id}: {pipeline_name}, pointing at {len(source
 # COMMAND ----------
 
 # Your turn. Write the silver declarations in 4_6_pipeline_source/4_6_silver, then run the check cell.
+
 
 # COMMAND ----------
 

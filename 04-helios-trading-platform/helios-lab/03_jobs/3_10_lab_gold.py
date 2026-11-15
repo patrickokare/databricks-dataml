@@ -262,23 +262,60 @@ check("date_key is typed as an int", "int", dict(dim_date.dtypes)["date_key"])
 # COMMAND ----------
 
 # Your turn. Build the point in time priced fact and upsert it on order_line_id.
+# Each block is labelled with the SQL clause it translates.
+silver = f"{catalog}.helios_silver"
+gold = f"{catalog}.helios_gold"
+fact_order_lines = f"{gold}.fact_order_lines"
 
+lines = spark.read.table(f"{silver}.silver_order_lines").alias("ol")
+prices = spark.read.table(f"{silver}.silver_price_scd").alias("sp")
 
+orders = spark.read.table(f"{silver}.silver_orders").select(col("order_id").alias("_ord_id"),col("status").alias("order_status"),)
 
+# LEFT JOIN (SELECT DISTINCT order_line_id, TRUE AS is_returned FROM silver_returns) r
+returns = (
+    spark.read.table(f"{silver}.silver_returns")
+    .select(col("order_line_id").alias("_ret_line_id"))
+    .distinct()
+    .withColumn("_returned", lit(True))
+)
 
+# ON  sp.product_id = ol.product_id
+# AND to_date(ol.line_ts) >= sp.effective_from
+# AND (sp.effective_to IS NULL OR to_date(ol.line_ts) < sp.effective_to)
+# SQL AND / OR become & / | in PySpark, and every comparison needs its own brackets.
+line_date = to_date(col("ol.line_ts"))
+price_in_effect = (
+    (col("sp.product_id") == col("ol.product_id")) & (line_date >= col("sp.effective_from")) & (col("sp.effective_to").isNull() | (line_date < col("sp.effective_to")))
+)
 
+fact = (
+    lines
+    .join(prices, price_in_effect, "left")                                   # LEFT JOIN ... sp ON <price_in_effect>
+    .join(orders, col("ol.order_id") == col("_ord_id"), "left")             # LEFT JOIN ... o ON o.order_id = ol.order_id
+    .join(returns, col("ol.order_line_id") == col("_ret_line_id"), "left")  # LEFT JOIN ... r ON r.order_line_id = ol.order_line_id
+ 
+    .select(
+        col("ol.order_line_id"),
+        col("ol.order_id"),                                                   # degenerate dimension
+        col("ol.product_id"),
+        col("ol.customer_id"),
+        col("ol.warehouse_id"),
+        col("sp.supplier_id"),                                                # from the price version in effect
+        date_format(col("ol.line_ts"), "yyyyMMdd").cast("int").alias("date_key"),
+        col("sp.price_sk"),
+        col("ol.quantity"),
+        col("sp.unit_price"),
+        col("sp.unit_cost"),
+        (col("ol.quantity") * col("sp.unit_price")).cast("decimal(14,2)").alias("gross_amount"),
+        (col("ol.quantity") * (col("sp.unit_price") - col("sp.unit_cost"))).cast("decimal(14,2)").alias("margin"),
+        col("order_status"),
+        coalesce(col("_returned"), lit(False)).alias("is_returned"),          # COALESCE(r.is_returned, FALSE)
+    )
+)
 
-
-
-
-
-
-
-
-
-
-
-
+# The SQL only selected rows. This line is the write: MERGE into Gold on order_line_id.
+upsert(fact, fact_order_lines, "order_line_id")
 
 
 
@@ -364,6 +401,52 @@ check("order_status is null or a valid lifecycle status", 0,
 # COMMAND ----------
 
 # Your turn. Build fact_returns (refund at original price) and fact_inventory.
+silver = f"{catalog}.helios_silver"
+gold = f"{catalog}.helios_gold"
+fact_returns = f"{gold}.fact_returns"
+fact_inventory = f"{gold}.fact_inventory"
+
+returns = spark.read.table(f"{silver}.silver_returns").alias("r")
+order_lines = spark.read.table(f"{silver}.silver_order_lines").alias("ol")
+prices = spark.read.table(f"{silver}.silver_price_scd").alias("sp")
+
+line_date = to_date(col("ol.line_ts"))
+price_in_effect = (
+    (col("sp.product_id") == col("ol.product_id")) & (line_date >= col("sp.effective_from")) & (col("sp.effective_to").isNull() | (line_date < col("sp.effective_to")))
+)
+
+returns_df = (
+    returns                                                                         # FROM silver_returns r (one row per return)
+    .join(order_lines, col("r.order_line_id") == col("ol.order_line_id"), "left")  # LEFT JOIN ... ol ON ol.order_line_id = r.order_line_id
+    .join(prices, price_in_effect, "left")                                          # LEFT JOIN ... sp ON <price in effect on the line's date>
+ 
+    .select(
+        col("r.return_id"),
+        col("r.order_line_id"),
+        col("ol.product_id"),
+        col("ol.customer_id"),
+        col("ol.warehouse_id"),
+        date_format(col("r.return_ts"), "yyyyMMdd").cast("int").alias("date_key"),
+        col("r.quantity").alias("quantity_returned"),
+        (col("r.quantity") * col("sp.unit_price")).cast("decimal(14,2)").alias("refund_amount"),  # cast the result, not the input
+    )
+)
+upsert(returns_df, fact_returns, "return_id")
+
+
+
+movements = (
+    spark.read.table(f"{silver}.silver_inventory")
+    .select(
+        col('warehouse_id'),
+        col('product_id'),
+        col('movement_ts'),
+        date_format(col("movement_ts"), "yyyyMMdd").cast("int").alias("date_key"),
+        col("delta"),
+        col("on_hand")
+    )
+)
+upsert(movements, fact_inventory, ["warehouse_id", "product_id", "movement_ts"])
 
 # COMMAND ----------
 

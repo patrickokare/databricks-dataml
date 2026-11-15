@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # MAGIC %md
 # MAGIC # Lab 4.5: Declare the bronze streaming tables
 # MAGIC
@@ -122,6 +126,10 @@ print(f"Created pipeline {pipeline_id}: {pipeline_name}, pointing at {len(source
 # COMMAND ----------
 
 # Your turn. Write the bronze declarations in 4_5_pipeline_source/4_5_bronze, then run the check cell.
+# Do not run declarations here: this driver notebook has no `dp`, `bronze` or `landing`.
+# They live in the 4_5_bronze source notebook, where the pipeline engine runs them.
+
+
 
 # COMMAND ----------
 

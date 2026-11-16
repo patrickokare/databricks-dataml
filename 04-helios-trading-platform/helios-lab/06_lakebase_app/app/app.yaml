@@ -1,0 +1,26 @@
+# Databricks App manifest for the Helios Depot Operations Console.
+#
+# Databricks Apps runs Streamlit as a supported framework and sets the server port
+# and address itself, so the command is just "streamlit run app.py". Do not pass
+# --server.port here: the platform does not expand ${DATABRICKS_APP_PORT} in the
+# command, so Streamlit would receive it literally and fail.
+#
+# Attach your Lakebase project as a Database resource (app Settings, Resources, Add
+# resource, Database, pointing at your helios-ops project, the production branch and
+# the databricks_postgres database, resource key "database"). That injects PGHOST,
+# PGPORT, PGDATABASE, PGUSER and PGSSLMODE and gives the app service principal a
+# Postgres role, so you do not set those here. The one value the resource does not
+# inject is ENDPOINT_NAME, the compute resource name app.py uses to mint the
+# connection token; get it from the branch's Computes tab (primary compute, Get ID,
+# Copy resource name). If you named your project helios-ops the value below is right.
+command:
+  - streamlit
+  - run
+  - app.py
+env:
+  - name: ENDPOINT_NAME
+    value: "projects/helios-ops/branches/production/endpoints/primary"
+  - name: STREAMLIT_SERVER_ENABLE_CORS
+    value: "false"
+  - name: STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION
+    value: "false"

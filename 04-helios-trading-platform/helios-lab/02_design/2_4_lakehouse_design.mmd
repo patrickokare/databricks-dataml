@@ -1,0 +1,71 @@
+flowchart LR
+    subgraph SRC["SOURCE FILES &nbsp; helios_landing"]
+        s_ol["order_lines<br/>JSON, daily, new rows only"]
+        s_o["orders<br/>JSON, daily, one row per change"]
+        s_p["price_list<br/>CSV, daily, full effective dated history"]
+        s_r["returns<br/>JSON, daily, new rows only"]
+        s_i["inventory<br/>JSON, daily, new rows only"]
+        s_c["customers<br/>Parquet, daily full snapshot"]
+        s_ref["products, categories, suppliers, warehouses<br/>full lists, delivered on change"]
+    end
+
+    subgraph BR["BRONZE &nbsp; raw, append only"]
+        b_ol["bronze_order_lines"]
+        b_o["bronze_orders"]
+        b_p["bronze_price_list"]
+        b_r["bronze_returns"]
+        b_i["bronze_inventory"]
+        b_c["bronze_customers"]
+        b_ref["bronze_products, bronze_categories,<br/>bronze_suppliers, bronze_warehouses"]
+    end
+
+    subgraph SIL["SILVER &nbsp; typed and conformed"]
+        si_ol["silver_order_lines<br/>one row per order line"]
+        si_o["silver_orders<br/>current state, one row per order"]
+        si_p["silver_price_scd<br/>SCD Type 2, every price version"]
+        si_r["silver_returns"]
+        si_i["silver_inventory<br/>movements with running on_hand"]
+        si_c["silver_customer_scd<br/>SCD Type 2, tier history"]
+        si_ref["silver_products, silver_categories,<br/>silver_suppliers, silver_warehouses"]
+        si_q["quarantine tables<br/>silver_order_lines_quarantine, silver_returns_quarantine<br/>rule breaking order lines and returns land here"]
+    end
+
+    subgraph GO["GOLD &nbsp; star schema"]
+        g_f1["fact_order_lines<br/>bookings grain, one row per placed order line<br/>priced point in time"]
+        g_f2["fact_returns<br/>refund at the original paid price"]
+        g_f3["fact_inventory<br/>one row per movement"]
+        g_dc["dim_customer<br/>SCD Type 2, tier over time"]
+        g_dims["dim_product, dim_category, dim_supplier,<br/>dim_warehouse, generated dim_date"]
+    end
+
+    CONS["Commercial analytics<br/>operations dashboards<br/>the operational app"]
+
+    s_ol -->|"new files only"| b_ol
+    s_o -->|"new files only"| b_o
+    s_r -->|"new files only"| b_r
+    s_i -->|"new files only"| b_i
+    s_p -->|"new files only"| b_p
+    s_c -->|"new files only"| b_c
+    s_ref -->|"new files only"| b_ref
+
+    b_ol -->|"dedup, keep the latest per order line"| si_ol
+    b_o -->|"merge, latest change wins"| si_o
+    b_r -->|"upsert"| si_r
+    b_i -->|"upsert"| si_i
+    b_p -->|"version the history"| si_p
+    b_c -->|"compare snapshots, version on change"| si_c
+    b_ref -->|"overwrite"| si_ref
+    b_ref ~~~ si_q
+
+    si_ol -->|"upsert on order_line_id"| g_f1
+    si_o -->|"order_status, left join"| g_f1
+    si_r -->|"is_returned, left join"| g_f1
+    si_r -->|"upsert"| g_f2
+    si_ol -->|"the returned order line"| g_f2
+    si_i -->|"upsert"| g_f3
+    si_p -->|"point in time price and cost"| g_f1
+    si_p -->|"original paid price"| g_f2
+    si_c -->|"overwrite"| g_dc
+    si_ref -->|"overwrite"| g_dims
+
+    GO --> CONS

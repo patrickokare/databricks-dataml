@@ -1,0 +1,7 @@
+# Python dependencies for the Depot Operations Console.
+# databricks-sdk 0.81+ is required for the w.postgres credential helper.
+# psycopg[binary,pool] is the PostgreSQL driver (version 3) plus its connection pool.
+streamlit
+pandas
+psycopg[binary,pool]>=3.2
+databricks-sdk>=0.81.0

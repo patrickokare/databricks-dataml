@@ -93,7 +93,7 @@ def dim_customer():
 # It passed for days, until the Ares mispricing landed. Lab 4.11 has you diagnose and fix this.
 @dp.materialized_view(name=f"{gold}.fact_order_lines", cluster_by=["order_line_id"],
                       comment="Order line fact, point in time priced on the price SCD2")
-@dp.expect_or_fail("non_negative_margin", "margin >= 0")
+@dp.expect("non_negative_margin", "margin >= 0")
 def fact_order_lines():
     lines = spark.read.table(f"{silver}.silver_order_lines").alias("l")
     prices = spark.read.table(f"{silver}.silver_price_scd").alias("p")

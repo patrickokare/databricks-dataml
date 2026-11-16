@@ -1,6 +1,6 @@
 # Performance tuning on Databricks and Delta Lake
 
-Concepts, how they apply to the Helios Trading Platform, and interview-ready summaries.
+Concepts, how they apply to the Helios Trading Platform.
 
 > **First rule: measure before you optimise.** Find the slow or expensive step with the query profile, the Spark UI and `system.billing.usage`, change one thing, and measure again. "Measured, not assumed."
 

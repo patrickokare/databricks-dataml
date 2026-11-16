@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # MAGIC %md
 # MAGIC # Lab 5.3: Build the semantic layer with Metric Views
 # MAGIC
@@ -108,7 +112,35 @@ print("fact_order_lines rows:", spark.table(f"{gold}.fact_order_lines").count())
 
 # COMMAND ----------
 
-# Your turn. Comment the Gold tables and columns, then run the self check below.
+gold = f"{catalog}.helios_gold"
+
+# ── Table comments ──────────────────────────────────────────────────────────
+spark.sql(f"COMMENT ON TABLE {gold}.fact_order_lines IS 'Order-line fact, one row per placed order line. Bookings grain: includes lines from cancelled and in-flight orders, so revenue and units are gross bookings. Point-in-time priced and costed; the hero fact for revenue and margin. Exclude CANCELLED order_status for net-of-cancellation revenue.'")
+spark.sql(f"COMMENT ON TABLE {gold}.fact_returns      IS 'Return fact, one row per return, refunded at the price the customer originally paid (point-in-time at the line).'")
+spark.sql(f"COMMENT ON TABLE {gold}.fact_inventory    IS 'Stock movement fact, one row per movement, carrying the signed delta and the running on_hand balance per depot and product.'")
+spark.sql(f"COMMENT ON TABLE {gold}.dim_warehouse     IS 'Depot dimension. Six depots across the solar system, the slicing axis for every dashboard.'")
+spark.sql(f"COMMENT ON TABLE {gold}.dim_product        IS 'Product dimension. 150 ship parts, each in one category and from one supplier.'")
+spark.sql(f"COMMENT ON TABLE {gold}.dim_category       IS 'Category dimension and its department roll-up (for example PROPULSION rolls up to PROPULSION_AND_POWER).'")
+spark.sql(f"COMMENT ON TABLE {gold}.dim_supplier       IS 'Supplier dimension, one row per supplier.'")
+spark.sql(f"COMMENT ON TABLE {gold}.dim_customer       IS 'Customer dimension as SCD Type 2 (tier over time). Filter is_current for the live tier; one row per customer per tier version.'")
+spark.sql(f"COMMENT ON TABLE {gold}.dim_date           IS 'Generated date dimension, keyed by date_key (the yyyyMMdd integer).'")
+
+# ── Column comments ─────────────────────────────────────────────────────────
+spark.sql(f"COMMENT ON COLUMN {gold}.fact_order_lines.gross_amount  IS 'Line revenue: quantity times the point-in-time unit_price, in CREDITS.'")
+spark.sql(f"COMMENT ON COLUMN {gold}.fact_order_lines.margin        IS 'Line gross profit: revenue minus the point-in-time cost, in CREDITS. Negative when the line sold below cost.'")
+spark.sql(f"COMMENT ON COLUMN {gold}.fact_order_lines.unit_price    IS 'Price per unit in force when the line was placed (point-in-time), in CREDITS.'")
+spark.sql(f"COMMENT ON COLUMN {gold}.fact_order_lines.unit_cost     IS 'Supplier cost per unit in force when the line was placed (point-in-time), in CREDITS.'")
+spark.sql(f"COMMENT ON COLUMN {gold}.fact_order_lines.warehouse_id  IS 'The depot that fulfilled the line.'")
+spark.sql(f"COMMENT ON COLUMN {gold}.fact_order_lines.product_id    IS 'The product ordered on the line.'")
+spark.sql(f"COMMENT ON COLUMN {gold}.fact_order_lines.is_returned   IS 'True when the line was later returned.'")
+spark.sql(f"COMMENT ON COLUMN {gold}.fact_order_lines.order_status  IS 'Current lifecycle status of the order this line belongs to: PLACED, PAID, PICKED, SHIPPED, DELIVERED, BACKORDERED, CANCELLED or RETURNED. NULL when the order has no current record. Exclude CANCELLED for net-of-cancellation revenue.'")
+spark.sql(f"COMMENT ON COLUMN {gold}.dim_customer.tier              IS 'Pricing tier: CHARTER (big contracts), TRADE (regular businesses), DRIFTER (walk-ins). Drives pricing and row-level security.'")
+spark.sql(f"COMMENT ON COLUMN {gold}.dim_warehouse.region           IS 'Solar-system region: INNER, BELT or OUTER.'")
+spark.sql(f"COMMENT ON COLUMN {gold}.fact_inventory.on_hand         IS 'Running stock balance after the movement; zero means a stockout.'")
+
+
+
+
 
 # COMMAND ----------
 
@@ -249,7 +281,99 @@ check_true("the key business columns are commented", all(bool(column_comment(t, 
 
 # COMMAND ----------
 
-# Your turn. Build order_lines_vw, then sales_mv, then run the self check below.
+# Step 1. The reporting view: one flat, business-named row per order line.
+semantic = f"{catalog}.helios_semantic"
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {semantic}")
+
+spark.sql(f"""
+CREATE OR REPLACE VIEW {semantic}.order_lines_vw AS
+SELECT
+  f.order_line_id, f.order_id, f.product_id, f.customer_id, f.warehouse_id, f.supplier_id,
+  f.date_key, f.price_sk, f.quantity, f.unit_price, f.unit_cost, f.gross_amount, f.margin, f.is_returned, f.order_status,
+  w.warehouse_name AS depot, w.region AS depot_region, w.body AS depot_body,
+  c.category_name, c.department,
+  p.product_name, p.sku AS product_sku, p.hazard_class,
+  s.supplier_name, s.home_region AS supplier_region,
+  cu.customer_type, cu.tier AS customer_tier,
+  d.date AS order_date,
+  COALESCE(r.returned_quantity, 0) AS returned_quantity,
+  COALESCE(r.refund_amount, 0)    AS refund_amount
+FROM {catalog}.helios_gold.fact_order_lines f
+LEFT JOIN {catalog}.helios_gold.dim_product   p  ON f.product_id   = p.product_id
+LEFT JOIN {catalog}.helios_gold.dim_category  c  ON p.category_id  = c.category_id
+LEFT JOIN {catalog}.helios_gold.dim_supplier  s  ON f.supplier_id  = s.supplier_id
+LEFT JOIN {catalog}.helios_gold.dim_warehouse w  ON f.warehouse_id = w.warehouse_id
+LEFT JOIN {catalog}.helios_gold.dim_customer  cu ON f.customer_id  = cu.customer_id AND cu.is_current
+LEFT JOIN {catalog}.helios_gold.dim_date      d  ON f.date_key     = d.date_key
+LEFT JOIN (
+  SELECT order_line_id, SUM(quantity_returned) AS returned_quantity, SUM(refund_amount) AS refund_amount
+  FROM {catalog}.helios_gold.fact_returns GROUP BY order_line_id
+) r ON f.order_line_id = r.order_line_id
+""")
+
+# Step 2. The metric view on top of the reporting view.
+spark.sql(f"""
+CREATE OR REPLACE VIEW {semantic}.sales_mv
+WITH METRICS
+LANGUAGE YAML
+AS $$
+version: 1.1
+source: "SELECT * FROM {semantic}.order_lines_vw"
+dimensions:
+  - name: Depot
+    expr: depot
+  - name: Depot Region
+    expr: depot_region
+  - name: Category
+    expr: category_name
+  - name: Department
+    expr: department
+  - name: Product
+    expr: product_name
+  - name: Product ID
+    expr: product_id
+  - name: Supplier
+    expr: supplier_name
+  - name: Supplier ID
+    expr: supplier_id
+  - name: Customer Type
+    expr: customer_type
+  - name: Customer Tier
+    expr: customer_tier
+  - name: Order Date
+    expr: order_date
+  - name: Sold Below Cost
+    expr: margin < 0
+  - name: Is Returned
+    expr: is_returned
+  - name: Order Status
+    expr: order_status
+measures:
+  - name: Revenue
+    expr: SUM(gross_amount)
+  - name: Gross Margin
+    expr: SUM(margin)
+  - name: Gross Margin Rate
+    expr: SUM(margin) / SUM(gross_amount)
+  - name: Units Sold
+    expr: SUM(quantity)
+  - name: Order Lines
+    expr: COUNT(1)
+  - name: Orders
+    expr: COUNT(DISTINCT order_id)
+  - name: Average Order Value
+    expr: SUM(gross_amount) / COUNT(DISTINCT order_id)
+  - name: Returned Units
+    expr: SUM(returned_quantity)
+  - name: Return Rate
+    expr: SUM(returned_quantity) / SUM(quantity)
+  - name: Net Revenue
+    expr: SUM(CASE WHEN order_status = 'CANCELLED' THEN 0 ELSE gross_amount END)
+  - name: Net Units Sold
+    expr: SUM(CASE WHEN order_status = 'CANCELLED' THEN 0 ELSE quantity END)
+$$
+""")
+
 
 # COMMAND ----------
 
@@ -372,6 +496,76 @@ check("return rate (returned units / sold units)", "0.0043", str(rate))
 # COMMAND ----------
 
 # Your turn. Build orders_vw, then orders_mv, then run the self check below.
+# Step 1. The reporting view: one row per order (its current state), plus whether it was ever BACKORDERED.
+# silver_orders keeps only the current status, so the ever_backordered flag is rebuilt from the raw change
+# feed in bronze (MAX over the order's history). Depot and current customer attributes are joined on for slicing.
+spark.sql(f"""
+CREATE OR REPLACE VIEW {catalog}.helios_semantic.orders_vw AS
+SELECT
+  o.order_id, o.customer_id, o.warehouse_id, o.channel, o.order_ts, o.status,
+  COALESCE(b.ever_backordered, false) AS ever_backordered,
+  to_date(o.order_ts) AS order_date,
+  w.warehouse_name AS depot, w.region AS depot_region,
+  cu.customer_type, cu.tier AS customer_tier
+FROM {catalog}.helios_silver.silver_orders o
+LEFT JOIN (
+  SELECT order_id, MAX(status = 'BACKORDERED') AS ever_backordered
+  FROM {catalog}.helios_bronze.bronze_orders GROUP BY order_id
+) b ON o.order_id = b.order_id
+LEFT JOIN {catalog}.helios_gold.dim_warehouse w  ON o.warehouse_id = w.warehouse_id
+LEFT JOIN {catalog}.helios_gold.dim_customer  cu ON o.customer_id  = cu.customer_id AND cu.is_current
+""")
+
+# Step 2. The metric view. The rate measures use FILTER (WHERE ...), which counts only the rows that match the
+# condition, so Cancellation Rate is cancelled orders over all orders and On Time Fulfilment Rate is the share
+# that reached DELIVERED without ever being BACKORDERED.
+spark.sql(f"""
+CREATE OR REPLACE VIEW {catalog}.helios_semantic.orders_mv
+WITH METRICS
+LANGUAGE YAML
+AS $$
+version: 1.1
+source: "SELECT * FROM {catalog}.helios_semantic.orders_vw"
+comment: "Helios order lifecycle: order volume, cancellation rate and on-time fulfilment. Grain is one order (current state). On-time means the order reached DELIVERED without ever being BACKORDERED. Slice by depot, channel, status, customer type and tier, and order date."
+dimensions:
+  - name: Depot
+    expr: depot
+  - name: Depot Region
+    expr: depot_region
+  - name: Channel
+    expr: channel
+    comment: "How the order was placed: API, CONSOLE or COUNTER"
+  - name: Order Status
+    expr: status
+    comment: "Current status: PLACED, PAID, PICKED, SHIPPED, DELIVERED, BACKORDERED, CANCELLED, RETURNED"
+  - name: Customer Type
+    expr: customer_type
+  - name: Customer Tier
+    expr: customer_tier
+  - name: Ever Backordered
+    expr: ever_backordered
+    comment: "True if the order passed through BACKORDERED at any point in its history"
+  - name: Order Date
+    expr: order_date
+measures:
+  - name: Orders
+    expr: COUNT(1)
+  - name: Cancelled Orders
+    expr: COUNT(1) FILTER (WHERE status = 'CANCELLED')
+  - name: Cancellation Rate
+    expr: COUNT(1) FILTER (WHERE status = 'CANCELLED') / COUNT(1)
+    comment: "Cancelled orders divided by all orders"
+  - name: Delivered Orders
+    expr: COUNT(1) FILTER (WHERE status = 'DELIVERED')
+  - name: On Time Fulfilments
+    expr: COUNT(1) FILTER (WHERE status = 'DELIVERED' AND NOT ever_backordered)
+  - name: On Time Fulfilment Rate
+    expr: COUNT(1) FILTER (WHERE status = 'DELIVERED' AND NOT ever_backordered) / COUNT(1)
+    comment: "Share of orders that reached DELIVERED without a BACKORDERED step"
+  - name: Backordered Orders
+    expr: COUNT(1) FILTER (WHERE ever_backordered)
+$$
+""")
 
 # COMMAND ----------
 
@@ -483,6 +677,66 @@ check("worst depot for cancellations on the incident day", "Ares Depot", worst)
 # COMMAND ----------
 
 # Your turn. Build inventory_vw, then inventory_mv, then run the self check below.
+# Step 1. The reporting view: one row per stock movement, with depot and product attributes joined on.
+spark.sql(f"""
+CREATE OR REPLACE VIEW {catalog}.helios_semantic.inventory_vw AS
+SELECT
+  i.warehouse_id, i.product_id, i.movement_ts, i.date_key, i.delta, i.on_hand,
+  w.warehouse_name AS depot, w.region AS depot_region,
+  p.product_name, c.category_name, c.department, d.date AS movement_date
+FROM {catalog}.helios_gold.fact_inventory i
+LEFT JOIN {catalog}.helios_gold.dim_warehouse w ON i.warehouse_id = w.warehouse_id
+LEFT JOIN {catalog}.helios_gold.dim_product   p ON i.product_id   = p.product_id
+LEFT JOIN {catalog}.helios_gold.dim_category  c ON p.category_id  = c.category_id
+LEFT JOIN {catalog}.helios_gold.dim_date      d ON i.date_key     = d.date_key
+""")
+
+# Step 2. The metric view. Units Out and Units In split the signed delta with a CASE; Stockout Events counts the
+# movements where on_hand hit zero; Min On Hand is the lowest balance reached.
+spark.sql(f"""
+CREATE OR REPLACE VIEW {catalog}.helios_semantic.inventory_mv
+WITH METRICS
+LANGUAGE YAML
+AS $$
+version: 1.1
+source: "SELECT * FROM {catalog}.helios_semantic.inventory_vw"
+comment: "Helios stock movements at the movement grain: units in and out, net change and stockouts (on_hand reaching zero). Slice by depot, product, category, department and date. Min On Hand reveals stockouts."
+dimensions:
+  - name: Depot
+    expr: depot
+  - name: Depot Region
+    expr: depot_region
+  - name: Product
+    expr: product_name
+  - name: Product ID
+    expr: product_id
+  - name: Category
+    expr: category_name
+  - name: Department
+    expr: department
+  - name: Movement Date
+    expr: movement_date
+  - name: Is Stockout
+    expr: on_hand = 0
+    comment: "True when on_hand reached zero (a stockout)"
+measures:
+  - name: Movements
+    expr: COUNT(1)
+  - name: Stockout Events
+    expr: COUNT(1) FILTER (WHERE on_hand = 0)
+  - name: Min On Hand
+    expr: MIN(on_hand)
+  - name: Units Out
+    expr: SUM(CASE WHEN delta < 0 THEN -delta ELSE 0 END)
+  - name: Units In
+    expr: SUM(CASE WHEN delta > 0 THEN delta ELSE 0 END)
+  - name: Net Stock Change
+    expr: SUM(delta)
+$$
+""")
+
+
+
 
 # COMMAND ----------
 

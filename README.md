@@ -29,9 +29,9 @@ Each project starts from a real or synthetic dataset and is fed by **dated incre
 | 1 | [Formula 1 Racing Lakehouse](./01-formula1-lakehouse) | Driver, constructor and pit-strategy performance across 70+ seasons | Transaction facts, SCD2, restatements, inferred members | 🚧 In progress |
 | 2 | [UK Rail Tickets & Punctuality](./02-uk-rail-analytics) | Which delays become refund claims, and what they cost | 3 business processes, role-playing and junk dimensions, **accumulating snapshot** | 🚧 In progress |
 | 3 | [Video Game Sales Analytics](./03-video-game-sales) | Sales trends by platform, region, genre and publisher over time | **Periodic snapshot**, semi-additive measures, AUTO CDC SCD2, scale testing | 🚧 In progress |
-| 4 | [Helios Trading Platform](./04-helios-trading-platform) | Order-to-cash for a parts distributor across 6 depots | 10 feeds, 4 arrival patterns, CDC, streaming Silver, Lakebase serving + Databricks App | 🚧 In progress |
+| 4 | [Helios Trading Platform](./04-helios-trading-platform) | Order-to-cash for a parts distributor across 6 depots | 10 feeds, 4 arrival patterns, CDC, streaming Silver, built twice (Jobs + declarative), Lakebase serving + Databricks App | ✅ Complete |
 
-Projects are built in this order on purpose: each one adds a harder pattern on top of the last.
+Helios was built first as the platform-breadth project (streaming, CDC, declarative pipelines, serving); the other three deepen the Kimball patterns.
 
 ---
 
@@ -130,23 +130,25 @@ flowchart LR
 |---|---|---|
 | New rows only | `order_lines`, `returns`, `inventory` | Stream from Bronze, `foreachBatch` MERGE, quarantine |
 | Row per change (CDC) | `orders` | Latest by `change_seq` (never `change_ts`), DELETE = purged cancellation |
-| Full snapshot daily | `customers`, `price_list` | Snapshot comparison → SCD2 |
+| Full copy every delivery | `customers`, `price_list` | SCD2: customers by snapshot comparison, prices sequenced by `effective_from` |
 | When changed | `products`, `categories`, `suppliers`, `warehouses` | Current-state overwrite |
 
-**Gold:** `fact_order_lines` (bookings grain), `fact_returns`, `fact_inventory_movements` with point-in-time pricing. Net Revenue, Margin and Return Rate are defined once as metric views.
+**Gold:** `fact_order_lines` (bookings grain), `fact_returns`, `fact_inventory` with point-in-time pricing. Revenue, Margin, Return Rate and 30+ other measures are defined once as metric views.
 
 **Built twice, then served:**
 1. **Imperative:** 5-task Databricks Job with retries, alerting, replay parameters and a self-check task.
-2. **Declarative:** Lakeflow Declarative Pipelines with expectations and AUTO CDC, plus an incident runbook diagnosed from the event log.
-3. **Semantic layer:** metric views → AI/BI dashboard + Genie space on one definition of revenue.
-4. **Serving:** curated Gold synced to **Lakebase**, powering a **Databricks App** (Depot Operations Console) with freshness indicators and row-level access.
+2. **Declarative:** one Lakeflow Spark Declarative Pipeline with expectations, AUTO CDC and AUTO CDC FROM SNAPSHOT, plus a production incident diagnosed from the event log.
+3. **Semantic layer:** metric views → AI/BI dashboard + Genie Agent on one definition of revenue.
+4. **Serving:** a curated depot summary synced to **Lakebase**, read by a **Databricks App** (Depot Operations Console) over short-lived OAuth tokens, no stored password.
+
+➡️ Full write-up, diagrams and decisions: [Helios README](./04-helios-trading-platform/README.md)
 
 ---
 
 ## Tech stack
 
 **Platform:** Databricks (serverless), Unity Catalog, Delta Lake, Lakebase, Databricks Apps
-**Processing:** PySpark, Spark SQL, Structured Streaming, Auto Loader, Lakeflow Jobs, Lakeflow Declarative Pipelines (AUTO CDC, expectations)
+**Processing:** PySpark, Spark SQL, Structured Streaming, Auto Loader, Lakeflow Jobs, Lakeflow Spark Declarative Pipelines (AUTO CDC, expectations)
 **Modelling:** Kimball dimensional modelling, medallion architecture
 **Serving & BI:** metric views, AI/BI dashboards, Genie
 **Engineering:** Databricks Asset Bundles, GitHub Actions, deterministic synthetic data generators, liquid clustering, Delta time travel
@@ -165,7 +167,7 @@ databricks-dataml/
 │   └── docs/         # spec, ADRs, diagrams, answer key, performance log
 ├── 02-uk-rail-analytics/        # same layout
 ├── 03-video-game-sales/         # same layout
-└── 04-helios-trading-platform/  # same layout
+└── 04-helios-trading-platform/  # lab layout: helios-lab/ (one folder per module) + docs/
 ```
 
 ## Running a project
